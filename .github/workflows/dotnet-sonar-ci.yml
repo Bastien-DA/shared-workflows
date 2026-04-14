@@ -63,8 +63,7 @@ jobs:
               run: dotnet build --no-restore --configuration Release
 
             - name: 🧪 Tests Unitaires et Couverture de code
-              run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage" --DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
-
+              run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage" -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
             - name: 🏁 Finalisation de l'analyse SonarCloud
               env:
                   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
