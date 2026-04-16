@@ -1,15 +1,15 @@
-name: Shared .NET CI Pipeline with SonarCloud
+name: Shared .NET CI with SonarCloud
 
 on:
     workflow_call:
         inputs:
             dotnet-version:
-                description: "La version du SDK .NET"
+                description: "The .NET SDK version"
                 required: false
                 type: string
                 default: "10.0.x"
             sonar-project-key:
-                description: "La clé unique du projet sur SonarCloud"
+                description: "The unique project key on SonarCloud"
                 required: true
                 type: string
         secrets:
@@ -24,29 +24,29 @@ jobs:
         runs-on: ubuntu-latest
 
         steps:
-            - name: 🛎️ Checkout du code
+            - name: Checkout code
               uses: actions/checkout@v6
               with:
                   fetch-depth: 0
 
-            - name: ⚙️ Setup .NET
+            - name: Setup .NET
               uses: actions/setup-dotnet@v5
               with:
                   dotnet-version: ${{ inputs.dotnet-version }}
 
-            - name: ☕ Setup Java 17 (Requis par SonarScanner)
+            - name: Setup Java 17 (Required by SonarScanner)
               uses: actions/setup-java@v5
               with:
                   java-version: "17"
                   distribution: "zulu"
 
-            - name: 🔍 Installation globale de SonarScanner pour .NET
+            - name: Install SonarScanner
               run: dotnet tool install --global dotnet-sonarscanner
 
-            - name: 📦 Restauration des dépendances
+            - name: Restore dependencies
               run: dotnet restore
 
-            - name: 🚀 Démarrage de l'analyse SonarCloud
+            - name: Start SonarCloud analysis
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -59,12 +59,13 @@ jobs:
                   /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml"
                   /d:sonar.qualitygate.wait=true
 
-            - name: 🏗️ Compilation (Build)
+            - name: Build
               run: dotnet build --no-restore --configuration Release
 
-            - name: 🧪 Tests Unitaires et Couverture de code
+            - name: Unit Tests and Code Coverage
               run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage" -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
-            - name: 🏁 Finalisation de l'analyse SonarCloud
+
+            - name: Finalize SonarCloud analysis
               env:
                   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
               run: dotnet sonarscanner end /d:sonar.token="${{ secrets.SONAR_TOKEN }}"
