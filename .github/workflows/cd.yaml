@@ -1,0 +1,181 @@
+name: Shared CD - Docker build & deploy
+
+on:
+    workflow_call:
+        inputs:
+            registry:
+                description: "Registry host, e.g. registry.mycompany.com or registry.mycompany.com:5000"
+                required: true
+                type: string
+            image-name:
+                description: "Image name without registry (default: owner/repo in lowercase)"
+                required: false
+                type: string
+                default: ""
+            dockerfile:
+                description: "Path to the Dockerfile"
+                required: false
+                type: string
+                default: "Dockerfile"
+            deploy:
+                description: "Deploy to the server after the push"
+                required: false
+                type: boolean
+                default: true
+            deploy-path:
+                description: "Directory on the server containing docker-compose.yml"
+                required: false
+                type: string
+                default: ""
+            health-timeout:
+                description: "Seconds to wait for the containers to be running/healthy after deploy"
+                required: false
+                type: number
+                default: 120
+        secrets:
+            REGISTRY_USERNAME:
+                required: true
+            REGISTRY_PASSWORD:
+                required: true
+            SSH_HOST:
+                required: false
+            SSH_USER:
+                required: false
+            SSH_PRIVATE_KEY:
+                required: false
+            SSH_KNOWN_HOSTS:
+                description: "Output of `ssh-keyscan <host>`"
+                required: false
+            SSH_PORT:
+                required: false
+
+permissions:
+    contents: write
+    pull-requests: read
+
+jobs:
+    build:
+        name: Version, build & push
+        runs-on: ubuntu-latest
+        outputs:
+            version: ${{ steps.version.outputs.version }}
+            image: ${{ steps.image.outputs.image }}
+
+        steps:
+            - name: Validate deploy configuration
+              if: ${{ inputs.deploy }}
+              env:
+                  DEPLOY_PATH: ${{ inputs.deploy-path }}
+                  SSH_HOST: ${{ secrets.SSH_HOST }}
+                  SSH_USER: ${{ secrets.SSH_USER }}
+                  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+                  SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+              run: |
+                  # Fail before pushing anything if the deploy job could not run
+                  missing=""
+                  for v in DEPLOY_PATH SSH_HOST SSH_USER SSH_PRIVATE_KEY SSH_KNOWN_HOSTS; do
+                    [ -n "${!v}" ] || missing="$missing $v"
+                  done
+                  if [ -n "$missing" ]; then
+                    echo "::error::deploy is enabled but these are missing:$missing"
+                    exit 1
+                  fi
+
+            - name: Checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            - name: Compute next version from the PR title
+              id: version
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  TITLE=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0].title // ""')
+                  echo "PR title: $TITLE"
+
+                  # #major / #minor / #patch (case-insensitive), patch by default
+                  # grep exits 1 when nothing matches, which would abort the step (bash -e -o pipefail)
+                  BUMP=$(echo "$TITLE" | { grep -oiE '#(major|minor|patch)' || true; } | head -1 | tr -d '#' | tr 'A-Z' 'a-z')
+                  BUMP=${BUMP:-patch}
+
+                  LAST=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo v0.0.0)
+                  IFS=. read -r MA MI PA <<< "${LAST#v}"
+                  case "$BUMP" in
+                    major) MA=$((MA+1)); MI=0; PA=0 ;;
+                    minor) MI=$((MI+1)); PA=0 ;;
+                    patch) PA=$((PA+1)) ;;
+                  esac
+
+                  echo "Bump: $BUMP ($LAST -> v$MA.$MI.$PA)"
+                  echo "version=$MA.$MI.$PA" >> "$GITHUB_OUTPUT"
+
+            - name: Tag git
+              run: |
+                  git tag "v${{ steps.version.outputs.version }}"
+                  git push origin "v${{ steps.version.outputs.version }}"
+
+            - name: Compute image reference
+              id: image
+              env:
+                  REGISTRY: ${{ inputs.registry }}
+                  IMAGE_NAME: ${{ inputs.image-name }}
+              run: |
+                  NAME=${IMAGE_NAME:-$GITHUB_REPOSITORY}
+                  echo "image=$REGISTRY/${NAME,,}" >> "$GITHUB_OUTPUT"
+
+            - name: Log in to the registry
+              uses: docker/login-action@v3
+              with:
+                  registry: ${{ inputs.registry }}
+                  username: ${{ secrets.REGISTRY_USERNAME }}
+                  password: ${{ secrets.REGISTRY_PASSWORD }}
+
+            - name: Build and push image
+              uses: docker/build-push-action@v6
+              with:
+                  context: .
+                  file: ${{ inputs.dockerfile }}
+                  push: true
+                  tags: ${{ steps.image.outputs.image }}:${{ steps.version.outputs.version }}
+
+    deploy:
+        name: Deploy to server
+        needs: build
+        if: ${{ inputs.deploy }}
+        runs-on: ubuntu-latest
+        permissions: {}
+
+        steps:
+            - name: Configure SSH
+              env:
+                  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+                  SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+              run: |
+                  mkdir -p ~/.ssh
+                  echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+                  chmod 600 ~/.ssh/deploy_key
+                  echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+            - name: Pull and restart on the server
+              env:
+                  SSH_HOST: ${{ secrets.SSH_HOST }}
+                  SSH_USER: ${{ secrets.SSH_USER }}
+                  SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+                  DEPLOY_PATH: ${{ inputs.deploy-path }}
+                  VERSION: ${{ needs.build.outputs.version }}
+                  HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
+                  REGISTRY: ${{ inputs.registry }}
+                  REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+                  REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+              run: |
+                  # The password is sent through stdin, never on the command line.
+                  # The trap removes the credentials from the server even if the deploy fails.
+                  echo "$REGISTRY_PASSWORD" | ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+                    "trap \"docker logout $REGISTRY\" EXIT; \
+                     docker login '$REGISTRY' -u '$REGISTRY_USERNAME' --password-stdin \
+                     && cd '$DEPLOY_PATH' \
+                     && export IMAGE_TAG='$VERSION' \
+                     && docker compose pull \
+                     && docker compose up -d --wait --wait-timeout '$HEALTH_TIMEOUT' \
+                     && docker image prune -f"

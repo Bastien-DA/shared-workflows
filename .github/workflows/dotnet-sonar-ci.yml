@@ -62,7 +62,7 @@ jobs:
             - name: Build
               run: dotnet build --no-restore --configuration Release
 
-            - name: Unit Tests and Code Coverage
+            - name: Unit Tests, Integration Tests and Code Coverage
               run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage" -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
 
             - name: Finalize SonarCloud analysis
