@@ -1,4 +1,4 @@
-name: Shared CD - Docker build & deploy
+name: Shared CD - Docker build & deploy for dotnet api
 
 on:
     workflow_call:

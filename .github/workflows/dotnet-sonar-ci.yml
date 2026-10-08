@@ -1,4 +1,4 @@
-name: Shared .NET CI with SonarCloud
+name: Shared .NET CI with SonarCloud for dotnet api
 
 on:
     workflow_call:
