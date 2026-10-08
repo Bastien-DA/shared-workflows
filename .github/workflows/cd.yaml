@@ -17,6 +17,16 @@ on:
                 required: false
                 type: string
                 default: "Dockerfile"
+            scan:
+                description: "Scan the image with Trivy before pushing it (fails on findings)"
+                required: false
+                type: boolean
+                default: true
+            scan-severity:
+                description: "Severities that make the scan fail"
+                required: false
+                type: string
+                default: "CRITICAL,HIGH"
             deploy:
                 description: "Deploy to the server after the push"
                 required: false
@@ -131,13 +141,38 @@ jobs:
                   username: ${{ secrets.REGISTRY_USERNAME }}
                   password: ${{ secrets.REGISTRY_PASSWORD }}
 
-            - name: Build and push image
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v4
+
+            # Built locally first so a vulnerable image is never pushed to the registry
+            - name: Build image
+              uses: docker/build-push-action@v6
+              with:
+                  context: .
+                  file: ${{ inputs.dockerfile }}
+                  load: true
+                  tags: ${{ steps.image.outputs.image }}:${{ steps.version.outputs.version }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            - name: Scan image with Trivy
+              if: ${{ inputs.scan }}
+              uses: aquasecurity/trivy-action@v0.36.0
+              with:
+                  image-ref: ${{ steps.image.outputs.image }}:${{ steps.version.outputs.version }}
+                  severity: ${{ inputs.scan-severity }}
+                  ignore-unfixed: true
+                  exit-code: "1"
+                  format: table
+
+            - name: Push image
               uses: docker/build-push-action@v6
               with:
                   context: .
                   file: ${{ inputs.dockerfile }}
                   push: true
                   tags: ${{ steps.image.outputs.image }}:${{ steps.version.outputs.version }}
+                  cache-from: type=gha
 
     deploy:
         name: Deploy to server
