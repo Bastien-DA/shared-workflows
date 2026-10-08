@@ -33,10 +33,15 @@ on:
                 type: boolean
                 default: true
             deploy-path:
-                description: "Directory on the server containing docker-compose.yml"
+                description: "Directory on the server where the compose file is copied and run (created if missing)"
                 required: false
                 type: string
                 default: ""
+            compose-file:
+                description: "Compose file of the repository, copied to <deploy-path>/docker-compose.yml on each deploy"
+                required: false
+                type: string
+                default: "docker-compose.yml"
             health-timeout:
                 description: "Seconds to wait for the containers to be running/healthy after deploy"
                 required: false
@@ -67,9 +72,9 @@ jobs:
     build:
         name: Version, build & push
         runs-on: ubuntu-latest
+        timeout-minutes: 30
         outputs:
             version: ${{ steps.version.outputs.version }}
-            image: ${{ steps.image.outputs.image }}
 
         steps:
             - name: Validate deploy configuration
@@ -120,11 +125,6 @@ jobs:
                   echo "Bump: $BUMP ($LAST -> v$MA.$MI.$PA)"
                   echo "version=$MA.$MI.$PA" >> "$GITHUB_OUTPUT"
 
-            - name: Tag git
-              run: |
-                  git tag "v${{ steps.version.outputs.version }}"
-                  git push origin "v${{ steps.version.outputs.version }}"
-
             - name: Compute image reference
               id: image
               env:
@@ -134,19 +134,11 @@ jobs:
                   NAME=${IMAGE_NAME:-$GITHUB_REPOSITORY}
                   echo "image=$REGISTRY/${NAME,,}" >> "$GITHUB_OUTPUT"
 
-            - name: Log in to the registry
-              uses: docker/login-action@v3
-              with:
-                  registry: ${{ inputs.registry }}
-                  username: ${{ secrets.REGISTRY_USERNAME }}
-                  password: ${{ secrets.REGISTRY_PASSWORD }}
-
             - name: Set up Docker Buildx
-              uses: docker/setup-buildx-action@v4
+              uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
-            # Built locally first so a vulnerable image is never pushed to the registry
             - name: Build image
-              uses: docker/build-push-action@v6
+              uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
               with:
                   context: .
                   file: ${{ inputs.dockerfile }}
@@ -157,7 +149,7 @@ jobs:
 
             - name: Scan image with Trivy
               if: ${{ inputs.scan }}
-              uses: aquasecurity/trivy-action@v0.36.0
+              uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
               with:
                   image-ref: ${{ steps.image.outputs.image }}:${{ steps.version.outputs.version }}
                   severity: ${{ inputs.scan-severity }}
@@ -165,8 +157,20 @@ jobs:
                   exit-code: "1"
                   format: table
 
+            - name: Tag git
+              run: |
+                  git tag "v${{ steps.version.outputs.version }}"
+                  git push origin "v${{ steps.version.outputs.version }}"
+
+            - name: Log in to the registry
+              uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+              with:
+                  registry: ${{ inputs.registry }}
+                  username: ${{ secrets.REGISTRY_USERNAME }}
+                  password: ${{ secrets.REGISTRY_PASSWORD }}
+
             - name: Push image
-              uses: docker/build-push-action@v6
+              uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
               with:
                   context: .
                   file: ${{ inputs.dockerfile }}
@@ -179,9 +183,29 @@ jobs:
         needs: build
         if: ${{ inputs.deploy }}
         runs-on: ubuntu-latest
-        permissions: {}
+        timeout-minutes: 15
+        permissions:
+            contents: read
+        concurrency:
+            group: deploy-${{ github.repository }}-${{ inputs.deploy-path }}
+            cancel-in-progress: false
 
         steps:
+            - name: Checkout compose file
+              uses: actions/checkout@v6
+              with:
+                  sparse-checkout: ${{ inputs.compose-file }}
+                  sparse-checkout-cone-mode: false
+
+            - name: Check compose file
+              env:
+                  COMPOSE_FILE: ${{ inputs.compose-file }}
+              run: |
+                  if [ ! -f "$COMPOSE_FILE" ]; then
+                    echo "::error::Compose file '$COMPOSE_FILE' not found in the repository"
+                    exit 1
+                  fi
+
             - name: Configure SSH
               env:
                   SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -191,6 +215,18 @@ jobs:
                   echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
                   chmod 600 ~/.ssh/deploy_key
                   echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+            - name: Copy compose file to the server
+              env:
+                  SSH_HOST: ${{ secrets.SSH_HOST }}
+                  SSH_USER: ${{ secrets.SSH_USER }}
+                  SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+                  DEPLOY_PATH: ${{ inputs.deploy-path }}
+                  COMPOSE_FILE: ${{ inputs.compose-file }}
+                  SSH_OPTS: -o BatchMode=yes -o StrictHostKeyChecking=yes
+              run: |
+                  ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "mkdir -p '$DEPLOY_PATH'"
+                  scp $SSH_OPTS -i ~/.ssh/deploy_key -P "$SSH_PORT" "$COMPOSE_FILE" "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/docker-compose.yml"
 
             - name: Pull and restart on the server
               env:
@@ -203,14 +239,13 @@ jobs:
                   REGISTRY: ${{ inputs.registry }}
                   REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
                   REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+                  SSH_OPTS: -o BatchMode=yes -o StrictHostKeyChecking=yes
               run: |
-                  # The password is sent through stdin, never on the command line.
-                  # The trap removes the credentials from the server even if the deploy fails.
-                  echo "$REGISTRY_PASSWORD" | ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+                  echo "$REGISTRY_PASSWORD" | ssh $SSH_OPTS -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
                     "trap \"docker logout $REGISTRY\" EXIT; \
                      docker login '$REGISTRY' -u '$REGISTRY_USERNAME' --password-stdin \
                      && cd '$DEPLOY_PATH' \
                      && export IMAGE_TAG='$VERSION' \
-                     && docker compose pull \
-                     && docker compose up -d --wait --wait-timeout '$HEALTH_TIMEOUT' \
+                     && docker compose -f docker-compose.yml pull \
+                     && docker compose -f docker-compose.yml up -d --wait --wait-timeout '$HEALTH_TIMEOUT' \
                      && docker image prune -f"
