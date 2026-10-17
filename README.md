@@ -147,8 +147,8 @@ Pour savoir si la nouvelle version tourne :
 
 | Secret | Obligatoire | Description |
 | --- | --- | --- |
-| `REGISTRY_USERNAME` | oui | Utilisateur Zot auquel appartient la clé |
-| `REGISTRY_TOKEN` | oui | API key Zot de cet utilisateur, utilisée comme mot de passe |
+| `REGISTRY_USERNAME` | oui | Login du compte du registry utilisé pour pousser l'image. Ce n'est pas l'hôte du registry (`zot.logards.fr`), qui se passe dans l'input `registry`. |
+| `REGISTRY_TOKEN` | oui | Token (ou mot de passe) de ce compte, passé à `docker login` comme mot de passe |
 | `WATCHTOWER_TOKEN` | si `deploy` | Token Bearer de l'API HTTP de Watchtower |
 
 ---
